@@ -99,27 +99,3 @@ install_bee $GITHUB_PAT /bee /bee/bee.conf $GIT_BRANCH
 gen_conf /bee/bee.conf $WFM_LISTEN_PORT $TM_LISTEN_PORT
 
 chown -R $USER:$USER /bee
-
-# Install Slurm and deps
-apt-get install -y slurmd slurmctld slurmrestd munge
-# Install the munge key
-echo $MUNGE_KEY | base64 -d > /etc/munge/munge.key
-# Install slurm config
-echo $SLURM_CONF | base64 -d > /etc/slurm/slurm.conf
-# Make spool directories
-mkdir /var/spool/slurmctld
-chown slurm:slurm /var/spool/slurmctld
-# Start and enable all daemons
-systemctl start munged
-systemctl enable munged
-# Slurmctld only should be started on the main node
-systemctl start slurmctld
-systemctl enable slurmctld
-systemctl start slurmd
-systemctl enable slurmd
-
-# Set up NFS
-apt-get install -y nfs-kernel-server
-echo "/home 10.93.78.0/24(rw,no_root_squash,subtree_check)" >> /etc/exports
-exportfs -a
-systemctl start nfs-server.service

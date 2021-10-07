@@ -34,12 +34,6 @@ parameters:
   tm_listen_port:
     type: string
     description: TM listen port
-  munge_key:
-    type: string
-    description: MUNGE key to be used for the cluster
-  slurm_conf:
-    type: string
-    description: Slurm configuration file
 resources:
   private_net:
     type: OS::Neutron::Net
@@ -66,15 +60,14 @@ resources:
     properties:
       name: bee-server
       # Custom snapshot with everything preinstalled
-      image: 'debian-11-generic-amd64'
+      image: 'debian-10-openstack-amd64'
       flavor: 'm1.small'
       key_name: { get_param: key_name }
       networks:
         - port: { get_resource: server_port }
       user_data:
         str_replace:
-          # template: { get_file: dora-setup.sh }
-          template: { get_file: dora-slurm-nodes-2.sh }
+          template: { get_file: dora-setup.sh }
           # Parameters added as input above need also be added here for
           # replacement
           params:
@@ -87,16 +80,12 @@ resources:
             $NAMESERVERS: { get_param: nameservers }
             $WFM_LISTEN_PORT: { get_param: wfm_listen_port }
             $TM_LISTEN_PORT: { get_param: tm_listen_port }
-            $MUNGE_KEY: { get_param: munge_key }
-            $SLURM_CONF: { get_param: slurm_conf }
   server_port:
     type: OS::Neutron::Port
     properties:
       network_id: { get_resource: private_net }
       fixed_ips:
         - subnet_id: { get_resource: private_subnet }
-          # Assign a fixed internal IP address
-          ip_address: 10.93.78.4
   server_floating_ip:
     type: OS::Neutron::FloatingIP
     properties:

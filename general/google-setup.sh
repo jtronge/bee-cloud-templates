@@ -1,5 +1,5 @@
 #!/bin/sh
-# OpenStack BEE install script
+# Google BEE install script
 
 # Install Charliecloud
 install_charliecloud()
@@ -62,7 +62,7 @@ workload_scheduler = Simple
 listen_port = $wfm_listen_port
 log = /home/$USER/.beeflow/logs/wfm.log
 [task_manager]
-name = dora-tm
+name = google-tm
 listen_port = $tm_listen_port
 container_runtime = Charliecloud
 log = /home/$USER/.beeflow/logs/tm.log
@@ -74,17 +74,13 @@ container_dir = /home/$USER
 EOF
 }
 
-# Setup Dora specific proxy and nameservers
-cat > /etc/profile.d/proxy.sh <<EOF
-export https_proxy=$HTTPS_PROXY
-export http_proxy=$HTTP_PROXY
-export no_proxy=$NO_PROXY
-EOF
-echo "" > /etc/resolv.conf
-for ns in `echo $NAMESERVERS | tr ',' ' '`; do
-    printf "nameserver $ns\n" >> /etc/resolv.conf
-done
-. /etc/profile
+# Add the bee user
+useradd -m -s /bin/bash $USER
+echo $USER:$PASSWORD | chpasswd
+echo "%$USER ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/bee
+mkdir -p /home/$USER/.ssh
+echo $PUBKEY | base64 -d > /home/$USER/.ssh/authorized_keys
+chown $USER:$USER -R /home/bee
 
 # Install general deps
 export DEBIAN_FRONTEND=noninteractive
@@ -99,27 +95,3 @@ install_bee $GITHUB_PAT /bee /bee/bee.conf $GIT_BRANCH
 gen_conf /bee/bee.conf $WFM_LISTEN_PORT $TM_LISTEN_PORT
 
 chown -R $USER:$USER /bee
-
-# Install Slurm and deps
-apt-get install -y slurmd slurmctld slurmrestd munge
-# Install the munge key
-echo $MUNGE_KEY | base64 -d > /etc/munge/munge.key
-# Install slurm config
-echo $SLURM_CONF | base64 -d > /etc/slurm/slurm.conf
-# Make spool directories
-mkdir /var/spool/slurmctld
-chown slurm:slurm /var/spool/slurmctld
-# Start and enable all daemons
-systemctl start munged
-systemctl enable munged
-# Slurmctld only should be started on the main node
-systemctl start slurmctld
-systemctl enable slurmctld
-systemctl start slurmd
-systemctl enable slurmd
-
-# Set up NFS
-apt-get install -y nfs-kernel-server
-echo "/home 10.93.78.0/24(rw,no_root_squash,subtree_check)" >> /etc/exports
-exportfs -a
-systemctl start nfs-server.service
