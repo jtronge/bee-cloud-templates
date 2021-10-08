@@ -61,16 +61,16 @@ resources:
     properties:
       router_id: { get_resource: router }
       subnet_id: { get_resource: private_subnet }
-  server:
+  main:
     type: OS::Nova::Server
     properties:
-      name: bee-server
+      name: bee-main
       # Custom snapshot with everything preinstalled
       image: 'debian-11-generic-amd64'
       flavor: 'm1.small'
       key_name: { get_param: key_name }
       networks:
-        - port: { get_resource: server_port }
+        - port: { get_resource: main_port }
       user_data:
         str_replace:
           # template: { get_file: dora-setup.sh }
@@ -89,7 +89,8 @@ resources:
             $TM_LISTEN_PORT: { get_param: tm_listen_port }
             $MUNGE_KEY: { get_param: munge_key }
             $SLURM_CONF: { get_param: slurm_conf }
-  server_port:
+            $TYPE: "main"
+  main_port:
     type: OS::Neutron::Port
     properties:
       network_id: { get_resource: private_net }
@@ -97,11 +98,48 @@ resources:
         - subnet_id: { get_resource: private_subnet }
           # Assign a fixed internal IP address
           ip_address: 10.93.78.4
-  server_floating_ip:
+  main_floating_ip:
     type: OS::Neutron::FloatingIP
     properties:
       floating_network: { get_param: public_net }
-      port_id: { get_resource: server_port }
+      port_id: { get_resource: main_port }
+  node0:
+    type: OS::Nova::Server
+    properties:
+      name: bee-node0
+      # Custom snapshot with everything preinstalled
+      image: 'debian-11-generic-amd64'
+      flavor: 'm1.small'
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: node0_port }
+      user_data:
+        str_replace:
+          # template: { get_file: dora-setup.sh }
+          template: { get_file: dora-slurm-nodes-2.sh }
+          # Parameters added as input above need also be added here for
+          # replacement
+          params:
+            $GITHUB_PAT: { get_param: github_pat }
+            $USER: debian
+            $GIT_BRANCH: { get_param: git_branch }
+            $HTTPS_PROXY: { get_param: https_proxy }
+            $HTTP_PROXY: { get_param: http_proxy }
+            $NO_PROXY: { get_param: no_proxy }
+            $NAMESERVERS: { get_param: nameservers }
+            $WFM_LISTEN_PORT: { get_param: wfm_listen_port }
+            $TM_LISTEN_PORT: { get_param: tm_listen_port }
+            $MUNGE_KEY: { get_param: munge_key }
+            $SLURM_CONF: { get_param: slurm_conf }
+            $TYPE: "node"
+  node0_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_resource: private_net }
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet }
+          # Assign a fixed internal IP address
+          ip_address: 10.93.78.5
 outputs:
-  server_public_ip:
-    value: { get_attr: [server_floating_ip, floating_ip_address] }
+  main_public_ip:
+    value: { get_attr: [main_floating_ip, floating_ip_address] }

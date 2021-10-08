@@ -104,22 +104,77 @@ chown -R $USER:$USER /bee
 apt-get install -y slurmd slurmctld slurmrestd munge
 # Install the munge key
 echo $MUNGE_KEY | base64 -d > /etc/munge/munge.key
-# Install slurm config
-echo $SLURM_CONF | base64 -d > /etc/slurm/slurm.conf
 # Make spool directories
 mkdir /var/spool/slurmctld
 chown slurm:slurm /var/spool/slurmctld
-# Start and enable all daemons
-systemctl start munged
-systemctl enable munged
+# Start and enable munge
+systemctl start munge
+systemctl enable munge
+# Configure Slurm
+cat >> /etc/slurm/slurm.conf <<EOF
+ClusterName=dora-bee
+SlurmctldHost=bee-main
+
+MpiDefault=pmix
+ProctrackType=proctrack/pgid
+ReturnToService=2
+SlurmctldPidFile=/var/run/slurmctld.pid
+SlurmctldPort=7777
+SlurmdPidFile=/var/run/slurmd.pid
+SlurmdPort=8989
+SlurmdSpoolDir=/var/spool/slurmd
+SlurmUser=slurm
+
+StateSaveLocation=/var/spool/slurmctld
+SwitchType=switch/none
+
+TaskPlugin=task/affinity
+
+InactiveLimit=0
+KillWait=30
+MinJobAge=300
+Waittime=0
+
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core
+
+AccountingStorageType=accounting_storage/none
+JobCompType=jobcomp/none
+JobAcctGatherType=jobacct_gather/none
+SlurmctldLogFile=/var/log/slurmctld.log
+SlurmdDebug=info
+SlurmdLogFile=/var/log/slurmd.log
+AuthType=auth/munge
+
+NodeName=bee-main CPUs=1 Boards=1 SocketsPerBoard=1 CoresPerSocket=1 ThreadsPerCore=1 RealMemory=1982
+NodeName=bee-node0 CPUs=1 Boards=1 SocketsPerBoard=1 CoresPerSocket=1 ThreadsPerCore=1 RealMemory=1982
+PartitionName=debug Nodes=ALL Default=YES MaxTime=INFINITE State=UP
+EOF
 # Slurmctld only should be started on the main node
-systemctl start slurmctld
-systemctl enable slurmctld
+if [ "$TYPE" = "main" ]; then
+    systemctl start slurmctld
+    systemctl enable slurmctld
+fi
 systemctl start slurmd
 systemctl enable slurmd
 
+cat >> /etc/hosts << EOF
+127.0.0.1		localhost localhost.localdomain
+::1			localhost localhost.localdomain
+
+10.93.78.4		bee-main
+10.93.78.5		bee-node0
+EOF
+
 # Set up NFS
 apt-get install -y nfs-kernel-server
-echo "/home 10.93.78.0/24(rw,no_root_squash,subtree_check)" >> /etc/exports
-exportfs -a
-systemctl start nfs-server.service
+if [ "$TYPE" = "main" ]; then
+    echo "/home 10.93.78.0/24(rw,no_root_squash,subtree_check)" >> /etc/exports
+    exportfs -a
+    systemctl start nfs-server.service
+else
+    # Sleep some time on the nodes to allow for the main node setup
+    sleep 120
+    mount 10.93.78.4:/home /home
+fi
