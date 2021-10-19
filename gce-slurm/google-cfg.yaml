@@ -1,0 +1,18 @@
+# These upper-level parameters are passed to the template as beeflow_{name}
+provider: google
+private_key_file: LOCATION OF PRIVATE KEY FILE
+bee_user: bee
+# Launch command for the TM -- this is dependent on BEE is installed
+tm_launch_cmd: /bin/tm
+head_node: HEAD NODE OF MACHINE
+template_file: TEMPLATE FILE LOCATION
+# List of files to copy over to the machine, for convenience
+copy_files:
+  - src: SOURCE FILE PATH
+    dst: DESTINATION FILE PATH
+  - src: SOURCE FILE PATH
+    dst: DESTINATION FILE PATH
+# wfm_listen_port: WFM LISTEN PORT
+tm_listen_port: TM LISTEN PORT
+# Special template parameters to pass to the cloud template
+provider_parameters: {}
