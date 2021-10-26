@@ -1,0 +1,250 @@
+{% macro slurmconf() %}
+ClusterName=bee-gce-slurm
+# SlurmctldHost=$slurmctld_host
+SlurmctldHost={{ main_node }}
+
+MpiDefault=pmix
+ProctrackType=proctrack/pgid
+ReturnToService=2
+SlurmctldPidFile=/var/run/slurmctld.pid
+SlurmctldPort=7777
+SlurmdPidFile=/var/run/slurmd.pid
+SlurmdPort=8989
+SlurmdSpoolDir=/var/spool/slurmd
+SlurmUser=slurm
+
+StateSaveLocation=/var/spool/slurmctld
+SwitchType=switch/none
+
+TaskPlugin=task/affinity
+
+InactiveLimit=0
+KillWait=30
+MinJobAge=300
+Waittime=0
+
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core
+
+AccountingStorageType=accounting_storage/none
+JobCompType=jobcomp/none
+JobAcctGatherType=jobacct_gather/none
+SlurmctldLogFile=/var/log/slurmctld.log
+SlurmdDebug=info
+SlurmdLogFile=/var/log/slurmd.log
+AuthType=auth/munge
+
+# NodeName=bee-node0 CPUs=1 Boards=1 SocketsPerBoard=1 CoresPerSocket=1 ThreadsPerCore=1 RealMemory=1982
+{% for node_name in compute_nodes %}
+NodeName={{ node_name }} CPUs=1 Boards=1 SocketsPerBoard=1 CoresPerSocket=1 ThreadsPerCore=1 RealMemory=1982
+{% endfor %}
+
+PartitionName=debug Nodes=ALL Default=YES MaxTime=INFINITE State=UP
+
+{% endmacro %}
+
+{% macro wireguard_conf_main() %}
+[Interface]
+PrivateKey = {{ main_node_vpn_key }}
+ListenPort = {{ vpn_port }}
+
+{% for node_name in compute_nodes %}
+[Peer]
+PublicKey = {{ compute_nodes[node_name]['pubkey'] }}
+# \n'.format(wireguard[comp]['pubkey']),
+PresharedKey = {{ compute_nodes[node_name]['psk'] }}
+# \n'.format(wireguard[comp]['psk']),
+AllowedIPs = {{ compute_nodes[node_name]['ip'] }}/32
+# \n'.format(wireguard[comp]['ip']),
+{% endfor %}
+{% endmacro %}
+
+{% macro wireguard_conf_compute(key, psk) %}
+[Interface]
+PrivateKey = {{ key }}
+[Peer]
+PublicKey = {{ main_vpn_pubkey }}
+PresharedKey = {{ psk }}
+Endpoint = {{ main_ip }}:{{ vpn_port }}
+AllowedIPs = {{ net_cidr }}
+PersistentKeepAlive = 50
+{% endmacro %}
+
+{% set ch_url = 'https://github.com/hpc/charliecloud/releases/download/v0.25/charliecloud-0.25.tar.gz' %}
+
+{% macro startup_script(wg_conf, ip, slurmctld_host, slurm_conf) %}
+#!/bin/sh
+# VPN Setup
+apt-get update
+apt-get install -y wireguard wireguard-tools
+cat > /etc/wireguard/wg0.conf <<EOF
+{{ wg_conf }}
+EOF
+chmod 600 /etc/wireguard/wg0.conf
+ip link add dev wg0 type wireguard
+ip addr add {{ ip }}/24 dev wg0
+sysctl net.ipv4.ip_forward=1
+wg setconf wg0 /etc/wireguard/wg0.conf
+ip link set up dev wg0
+# Add to the hosts file
+cat >> /etc/hosts <<EOF
+{% for node_name in compute_nodes %}
+{{ compute_nodes[node_name]['ip'] }}  {{ node_name }}
+{% endfor %}
+EOF
+# Setup NFS on slurmctld nodes
+{% if slurmctld_node %}
+apt-get update
+apt-get install -y nfs-kernel-server
+echo "/home {{ net_cidr }}(rw,no_root_squash,subtree_check)" >> /etc/exports
+exportfs -a
+systemctl start nfs-server.service
+{% endif %}
+# Base script
+# Install general deps
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y git curl vim tmux screen gcc make openmpi-bin libopenmpi-dev python3 python3-venv
+# Install Charliecloud
+cd /tmp
+curl -O -L {{ ch_url }} || exit 1
+tar -xvf `basename {{ ch_url }}`
+export DIR=`basename {{ ch_url }} | rev | cut -d"." -f3- | rev`
+cd $DIR
+./configure --prefix=/opt/$DIR || exit 1
+make && make install || exit 1
+cat > /etc/profile.d/charliecloud.sh <<EOF
+export PATH=/opt/$DIR/bin:\$PATH
+EOF
+# Add the bee user
+useradd -m -s /bin/bash {{ user }}
+echo "{{ user }}:{{ password }}" | chpasswd
+echo "%{{ user }} ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/bee
+mkdir -p /home/{{ user }}/.ssh
+echo {{ pubkey_base64 }} | base64 -d > /home/{{ user }}/.ssh/authorized_keys
+chown {{ user }}:{{ user }} -R /home/bee
+# Enable user namespaces for debian
+/sbin/sysctl kernel.unprivileged_userns_clone=1
+# Setup
+# Install Slurm and deps
+apt-get install -y slurmd slurmctld slurmrestd munge
+echo {{ munge_key_base64 }} | base64 -d > /etc/munge/munge.key
+# Create spool directories
+mkdir /var/spool/slurmctld
+chown slurm:slurm /var/spool/slurmctld
+# Start munge
+systemctl start munge
+systemctl enable munge
+# Configure slurm
+cat >> /etc/slurm/slurm.conf <<EOF
+{{ slurm_conf }}
+EOF
+{% if slurmctld_node %}
+systemctl start slurmctld
+systemctl enable slurmctld
+{% else %}
+systemctl start slurmd
+systemctl enable slurmd
+{% endif %}
+
+# NFS Setup
+{% if not slurmctld_node %}
+sleep 120
+mount {{ main_ip }}:/home /home
+{% endif %}
+# Install BEE
+{% if slurmctld_node %}
+mkdir -p {{ bee_dir }}
+cd {{ bee_dir }}
+# Clone the private repo
+git clone https://{{ github_pat }}:x-oauth-basic@github.com/lanl/BEE_Private.git || exit 1
+cd BEE_Private
+git checkout {{ git_branch }}
+# Install BEE in a venv with poetry
+python3 -m venv venv
+. venv/bin/activate
+pip install --upgrade pip
+pip install poetry
+poetry update
+poetry install
+# Output the bee.conf
+cat >> {{ bee_dir }}/bee.conf <<EOF
+[DEFAULT]
+bee_workdir = /home/{{ user }}/.beeflow
+workload_scheduler = Slurm
+[workflow_manager]
+listen_port = {{ beeflow_wfm_listen_port }}
+log = /home/{{ user }}/.beeflow/logs/wfm.log
+[task_manager]
+name = google-tm
+listen_port = {{ beeflow_tm_listen_port }}
+container_runtime = Charliecloud
+log = /home/{{ user }}/.beeflow/logs/tm.log
+[charliecloud]
+setup = module load charliecloud
+image_mntdir = /tmp
+chrun_opts = --cd /home/{{ user }}
+container_dir = /home/{{ user }}
+EOF
+# Generate the startup script
+cat >> {{ bee_dir }}/tm <<EOF
+#!/bin/sh
+. /etc/profile
+cd /bee/BEE_Private
+. ./venv/bin/activate
+exec python -m beeflow.task_manager {{ bee_conf }}
+EOF
+chmod 755 {{ bee_dir }}/tm
+chown -R {{ user }}:{{ user }} /bee
+{% endif %}
+{% endmacro %}
+
+instances:
+  - name: {{ main_node }}
+    machineType: {{ main_machine_str }}
+    disks:
+      # Set the boot disk
+      - boot: True
+        autoDelete: True
+        initializeParams:
+          # Set the source image and disk size
+          sourceImage: {{ main_src_image }}
+          diskSizeGb: {{ main_disk_size_gb }}
+    networkInterfaces:
+      - network: 'global/networks/default'
+      - accessConfigs:
+          - type: 'ONE_TO_ONE_NAT'
+            name: 'External NAT'
+    metadata:
+      items:
+        # Start up script for the main node
+        - key: 'startup-script'
+          value: |
+{{ startup_script(wireguard_conf_main(), main_ip, True, slurmconf())|indent(12) }}
+
+{% for node_name in compute_nodes %}
+  - name: {{ node_name }}
+    machineType: {{ compute_nodes[node_name]['machine_str'] }}
+
+    disks:
+      # Set the boot disk
+      - boot: True
+        autoDelete: True
+        initializeParams:
+          # Set the source image and disk size
+          sourceImage: {{ compute_nodes[node_name]['src_image'] }}
+          diskSizeGb: {{ compute_nodes[node_name]['disk_size_gb'] }}
+
+    networkInterfaces:
+      - network: 'global/networks/default'
+      - accessConfigs:
+          - type: 'ONE_TO_ONE_NAT'
+            name: 'External NAT'
+    metadata:
+      items:
+        # Start up script for the node
+        - key: 'startup-script'
+          value: |
+{{ startup_script(wireguard_conf_compute(), compute_nodes[node_name]['ip'], False, slurmconf())|indent(12) }}
+{% endfor %}

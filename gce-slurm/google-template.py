@@ -47,6 +47,7 @@ AuthType=auth/munge
 # PartitionName=debug Nodes=ALL Default=YES MaxTime=INFINITE State=UP
 """)
 
+
 def generate_slurm_conf(slurmctld_host, nodes, node_params):
     """Generate the slurm.conf based on the given nodes."""
     conf = [SLURM_CONF.substitute(slurmctld_host=slurmctld_host)]
@@ -56,12 +57,13 @@ def generate_slurm_conf(slurmctld_host, nodes, node_params):
     conf.append('PartitionName=debug Nodes=ALL Default=YES MaxTime=INFINITE State=UP')
     return ''.join(conf)
 
-def setup_slurm(slurm_conf, slurmctld_node=False):
+
+def setup_slurm(slurm_conf, munge_key, slurmctld_node=False):
     """Generate the slurm setup script."""
     setup = [
         # Install Slurm and deps
         'apt-get install -y slurmd slurmctld slurmrestd munge\n',
-        'echo $MUNGE_KEY | base64 -d > /etc/munge/munge.key\n',
+        'echo {} | base64 -d > /etc/munge/munge.key\n'.format(munge_key),
         # Create spool directories
         'mkdir /var/spool/slurmctld\n',
         'chown slurm:slurm /var/spool/slurmctld\n',
@@ -319,13 +321,14 @@ def generate_main_vpn_setup(wireguard, wireguard_port, main_node):
 def generate_compute_vpn_setup(wireguard, wireguard_port, host, net_cidr, main,
                                main_ip):
     """Generate the VPN setup script for the compute nodes."""
-    pubkey = wireguard[main]['pubkey']
-    psk = wireguard[main]['psk']
+    main_pubkey = wireguard[main]['pubkey']
+    key = wireguard[host]['key']
+    psk = wireguard[host]['psk']
     conf = [
         '[Interface]\n',
-        'PrivateKey = {}\n'.format(host),
+        'PrivateKey = {}\n'.format(key),
         '[Peer]\n',
-        'PublicKey = {}\n'.format(pubkey),
+        'PublicKey = {}\n'.format(main_pubkey),
         'PresharedKey = {}\n'.format(psk),
         'Endpoint = {}:{}\n'.format(main_ip, wireguard_port),
         'AllowedIPs = {}\n'.format(net_cidr),
@@ -334,10 +337,12 @@ def generate_compute_vpn_setup(wireguard, wireguard_port, host, net_cidr, main,
     wg_conf = ''.join(conf)
     return generate_base_vpn_setup(wireguard, wg_conf, host)
 
+
 # TODO: Some of these arguments, like machine_type should be set by default in this template
 def setup(template_api, node_name, startup_script=None,
           machine_type='n1-standard-1', src_image=SRC_IMAGE, disk_size_gb=10,
-          wireguard=None, wireguard_port=None, net_cidr=None, **kwargs):
+          wireguard=None, wireguard_port=None, net_cidr=None, munge_key=None,
+          **kwargs):
     """Create a google node config and return it."""
     base_script = generate_base_script(**kwargs)
 
@@ -366,7 +371,7 @@ def setup(template_api, node_name, startup_script=None,
         'exportfs -a\n',
         'systemctl start nfs-server.service\n',
     ])
-    setup = setup_slurm(slurm_conf, slurmctld_node=True)
+    setup = setup_slurm(slurm_conf, munge_key, slurmctld_node=True)
     startup_script = ''.join([vpn_setup, nfs_setup, base_script, setup, bee_setup])
     print(startup_script)
 
@@ -381,7 +386,7 @@ def setup(template_api, node_name, startup_script=None,
     for node in compute_nodes:
         print('Creating', node, 'node')
         vpn_setup = generate_compute_vpn_setup(wireguard, wireguard_port, node, net_cidr, main, main_ip)
-        setup = setup_slurm(slurm_conf)
+        setup = setup_slurm(slurm_conf, munge_key)
         nfs_setup = ''.join([
              # Sleep some time on the nodes to allow for the main node setup
             'sleep 120',
@@ -395,3 +400,8 @@ def setup(template_api, node_name, startup_script=None,
 
     time.sleep(2)
     # TODO: This should be done with Google's VPC, but for now this will do.
+
+
+def setup_cloud(provider):
+    """Perform the general cloud setup."""
+    setup(provider, **provider.params)
