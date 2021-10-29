@@ -46,12 +46,12 @@ PartitionName=debug Nodes=ALL Default=YES MaxTime=INFINITE State=UP
 
 {% macro wireguard_conf_main() %}
 [Interface]
-PrivateKey = {{ main_node_vpn_key }}
+PrivateKey = {{ main_vpn_key }}
 ListenPort = {{ vpn_port }}
 
 {% for node_name in compute_nodes %}
 [Peer]
-PublicKey = {{ compute_nodes[node_name]['pubkey'] }}
+PublicKey = {{ compute_nodes[node_name]['vpn_pubkey'] }}
 # \n'.format(wireguard[comp]['pubkey']),
 PresharedKey = {{ compute_nodes[node_name]['psk'] }}
 # \n'.format(wireguard[comp]['psk']),
@@ -66,18 +66,19 @@ PrivateKey = {{ key }}
 [Peer]
 PublicKey = {{ main_vpn_pubkey }}
 PresharedKey = {{ psk }}
-Endpoint = {{ main_ip }}:{{ vpn_port }}
+Endpoint = {{ main_ext_ip }}:{{ vpn_port }}
 AllowedIPs = {{ net_cidr }}
 PersistentKeepAlive = 50
 {% endmacro %}
 
 {% set ch_url = 'https://github.com/hpc/charliecloud/releases/download/v0.25/charliecloud-0.25.tar.gz' %}
 
-{% macro startup_script(wg_conf, ip, slurmctld_host, slurm_conf) %}
+{% macro startup_script(wg_conf, ip, slurmctld_node, slurm_conf) %}
 #!/bin/sh
 # VPN Setup
 apt-get update
-apt-get install -y wireguard wireguard-tools
+# For some reason WireGuard also requires linux headers to be installed
+apt-get install -y wireguard wireguard-tools linux-headers-`uname -r`
 cat > /etc/wireguard/wg0.conf <<EOF
 {{ wg_conf }}
 EOF
@@ -89,17 +90,20 @@ wg setconf wg0 /etc/wireguard/wg0.conf
 ip link set up dev wg0
 # Add to the hosts file
 cat >> /etc/hosts <<EOF
+{{ main_ip }} {{ main_node }}
 {% for node_name in compute_nodes %}
-{{ compute_nodes[node_name]['ip'] }}  {{ node_name }}
+{{ compute_nodes[node_name]['ip'] }} {{ node_name }}
 {% endfor %}
 EOF
 # Setup NFS on slurmctld nodes
-{% if slurmctld_node %}
 apt-get update
+{% if slurmctld_node %}
 apt-get install -y nfs-kernel-server
 echo "/home {{ net_cidr }}(rw,no_root_squash,subtree_check)" >> /etc/exports
 exportfs -a
 systemctl start nfs-server.service
+{% else %}
+apt-get install -y nfs-common
 {% endif %}
 # Base script
 # Install general deps
@@ -118,18 +122,24 @@ cat > /etc/profile.d/charliecloud.sh <<EOF
 export PATH=/opt/$DIR/bin:\$PATH
 EOF
 # Add the bee user
-useradd -m -s /bin/bash {{ user }}
-echo "{{ user }}:{{ password }}" | chpasswd
-echo "%{{ user }} ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/bee
-mkdir -p /home/{{ user }}/.ssh
-echo {{ pubkey_base64 }} | base64 -d > /home/{{ user }}/.ssh/authorized_keys
-chown {{ user }}:{{ user }} -R /home/bee
+useradd -m -s /bin/bash {{ bee_user }}
+echo "{{ bee_user }}:{{ password }}" | chpasswd
+echo "%{{ bee_user }} ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/bee
+mkdir -p /home/{{ bee_user }}/.ssh
+echo {{ pubkey_base64 }} | base64 -d > /home/{{ bee_user }}/.ssh/authorized_keys
+chown {{ bee_user }}:{{ bee_user }} -R /home/bee
 # Enable user namespaces for debian
 /sbin/sysctl kernel.unprivileged_userns_clone=1
 # Setup
 # Install Slurm and deps
 apt-get install -y slurmd slurmctld slurmrestd munge
+# Save the munge key
 echo {{ munge_key_base64 }} | base64 -d > /etc/munge/munge.key
+# Make sure the uid+gids for munge are consistent
+systemctl stop munge
+usermod -u 1414 munge
+groupmod -g 1414 munge
+chown -R munge:munge /var/lib/munge /var/log/munge /etc/munge
 # Create spool directories
 mkdir /var/spool/slurmctld
 chown slurm:slurm /var/spool/slurmctld
@@ -141,20 +151,22 @@ cat >> /etc/slurm/slurm.conf <<EOF
 {{ slurm_conf }}
 EOF
 {% if slurmctld_node %}
+# Control node
 systemctl start slurmctld
 systemctl enable slurmctld
 {% else %}
+# Compute node
 systemctl start slurmd
 systemctl enable slurmd
 {% endif %}
 
-# NFS Setup
 {% if not slurmctld_node %}
+# NFS Setup
 sleep 120
-mount {{ main_ip }}:/home /home
+mount {{ main_node }}:/home /home
 {% endif %}
-# Install BEE
 {% if slurmctld_node %}
+# Install BEE
 mkdir -p {{ bee_dir }}
 cd {{ bee_dir }}
 # Clone the private repo
@@ -171,33 +183,44 @@ poetry install
 # Output the bee.conf
 cat >> {{ bee_dir }}/bee.conf <<EOF
 [DEFAULT]
-bee_workdir = /home/{{ user }}/.beeflow
+bee_workdir = /home/{{ bee_user }}/.beeflow
 workload_scheduler = Slurm
 [workflow_manager]
-listen_port = {{ beeflow_wfm_listen_port }}
-log = /home/{{ user }}/.beeflow/logs/wfm.log
+listen_port = {{ wfm_listen_port }}
+log = /home/{{ bee_user }}/.beeflow/logs/wfm.log
 [task_manager]
 name = google-tm
-listen_port = {{ beeflow_tm_listen_port }}
+listen_port = {{ tm_listen_port }}
 container_runtime = Charliecloud
-log = /home/{{ user }}/.beeflow/logs/tm.log
+log = /home/{{ bee_user }}/.beeflow/logs/tm.log
 [charliecloud]
 setup = module load charliecloud
 image_mntdir = /tmp
-chrun_opts = --cd /home/{{ user }}
-container_dir = /home/{{ user }}
+chrun_opts = --cd /home/{{ bee_user }}
+container_dir = /home/{{ bee_user }}
+[slurmrestd]
+slurm_socket = {{ slurm_socket }}
+[builder]
+container_archive = /home/{{ bee_user }}/container_archive
+# deployed_image_root = /var/tmp/{{ bee_user }}/beeflow_deployed_containers
+deployed_image_root = /tmp
 EOF
 # Generate the startup script
 cat >> {{ bee_dir }}/tm <<EOF
 #!/bin/sh
 . /etc/profile
+# Note: we have to specify the proper openapi interface to load
+/usr/sbin/slurmrestd -s openapi/v0.0.35 unix:{{ slurm_socket }} &
 cd /bee/BEE_Private
 . ./venv/bin/activate
-exec python -m beeflow.task_manager {{ bee_conf }}
+exec python -m beeflow.task_manager {{ bee_dir }}/bee.conf
 EOF
 chmod 755 {{ bee_dir }}/tm
-chown -R {{ user }}:{{ user }} /bee
+chown -R {{ bee_user }}:{{ bee_user }} /bee
 {% endif %}
+
+
+{{ slurmctldnode }}
 {% endmacro %}
 
 instances:
@@ -213,9 +236,10 @@ instances:
           diskSizeGb: {{ main_disk_size_gb }}
     networkInterfaces:
       - network: 'global/networks/default'
-      - accessConfigs:
-          - type: 'ONE_TO_ONE_NAT'
-            name: 'External NAT'
+        accessConfigs:
+        - type: 'ONE_TO_ONE_NAT'
+          name: 'External NAT'
+          natIP: '{{ main_ext_ip }}'
     metadata:
       items:
         # Start up script for the main node
@@ -238,13 +262,15 @@ instances:
 
     networkInterfaces:
       - network: 'global/networks/default'
-      - accessConfigs:
-          - type: 'ONE_TO_ONE_NAT'
-            name: 'External NAT'
+        accessConfigs:
+        - type: 'ONE_TO_ONE_NAT'
+          name: 'External NAT'
     metadata:
       items:
         # Start up script for the node
         - key: 'startup-script'
           value: |
-{{ startup_script(wireguard_conf_compute(), compute_nodes[node_name]['ip'], False, slurmconf())|indent(12) }}
+{{ startup_script(wireguard_conf_compute(compute_nodes[node_name]['vpn_key'],
+                                         compute_nodes[node_name]['psk']),
+                  compute_nodes[node_name]['ip'], False, slurmconf())|indent(12) }}
 {% endfor %}

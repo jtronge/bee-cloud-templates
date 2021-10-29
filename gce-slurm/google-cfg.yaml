@@ -12,7 +12,6 @@ copy_files:
     dst: DESTINATION FILE PATH
   - src: SOURCE FILE PATH
     dst: DESTINATION FILE PATH
-# wfm_listen_port: WFM LISTEN PORT
+wfm_listen_port: WFM LISTEN PORT
 tm_listen_port: TM LISTEN PORT
 # Special template parameters to pass to the cloud template
-provider_parameters: {}
